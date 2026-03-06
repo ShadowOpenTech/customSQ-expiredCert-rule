@@ -68,6 +68,29 @@ public class ExpiredCertSensor implements Sensor {
 
     @Override
     public void execute(SensorContext context) {
+        // ── Graceful top-level guard ──────────────────────────────────────────
+        // Any unhandled exception is caught here so the plugin never causes
+        // other sensors or the overall scan to fail.
+        try {
+            doExecute(context);
+        } catch (Exception e) {
+            LOG.warn("ExpiredCertSensor: unexpected error — plugin will not affect other analysis results. "
+                    + "Error: {}", e.getMessage());
+            LOG.debug("ExpiredCertSensor: full stack trace", e);
+        }
+    }
+
+    private void doExecute(SensorContext context) {
+        // ── Toggle check ──────────────────────────────────────────────────────
+        boolean enabled = context.config()
+                .getBoolean(ExpiredCertRulesDefinition.PROPERTY_ENABLED)
+                .orElse(true);
+        if (!enabled) {
+            LOG.info("ExpiredCertSensor: disabled via '{}' — skipping scan.",
+                    ExpiredCertRulesDefinition.PROPERTY_ENABLED);
+            return;
+        }
+
         int warningDays = context.config()
                 .getInt(ExpiredCertRulesDefinition.PROPERTY_WARNING_DAYS)
                 .orElse(60);
@@ -75,9 +98,15 @@ public class ExpiredCertSensor implements Sensor {
         List<String> passwords = buildPasswordList(context);
         Path baseDir = context.fileSystem().baseDir().toPath();
 
-        LOG.info("ExpiredCertSensor: scanning {} (warningDays={})", baseDir, warningDays);
+        Severity severityExpired      = resolveSeverity(context,
+                ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRED, Severity.INFO);
+        Severity severityExpiringSoon = resolveSeverity(context,
+                ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRING_SOON, Severity.INFO);
 
-        registerAdHocRules(context);
+        LOG.info("ExpiredCertSensor: scanning {} (warningDays={}, severityExpired={}, severityExpiringSoon={})",
+                baseDir, warningDays, severityExpired, severityExpiringSoon);
+
+        registerAdHocRules(context, severityExpired, severityExpiringSoon);
 
         try {
             Files.walkFileTree(baseDir, new SimpleFileVisitor<>() {
@@ -99,23 +128,28 @@ public class ExpiredCertSensor implements Sensor {
                         if (CERT_EXTENSIONS.contains(ext)) {
                             try (InputStream is = Files.newInputStream(file)) {
                                 List<CertificateInfo> certs = pemDerParser.parse(is, relativePath);
-                                reportIssues(certs, file, warningDays, context);
+                                reportIssues(certs, file, warningDays,
+                                        severityExpired, severityExpiringSoon, context);
                             }
                         } else if (KEYSTORE_EXTENSIONS.contains(ext)) {
                             String type = keystoreType(ext);
                             try (InputStream is = Files.newInputStream(file)) {
                                 List<CertificateInfo> certs =
                                         keyStoreParser.parse(is, relativePath, type, passwords);
-                                reportIssues(certs, file, warningDays, context);
+                                reportIssues(certs, file, warningDays,
+                                        severityExpired, severityExpiringSoon, context);
                             }
                         } else if (ARCHIVE_EXTENSIONS.contains(ext)) {
                             try (InputStream is = Files.newInputStream(file)) {
                                 processArchiveBytes(is.readAllBytes(), relativePath,
-                                        warningDays, passwords, context, file);
+                                        warningDays, passwords, severityExpired, severityExpiringSoon,
+                                        context, file);
                             }
                         }
-                    } catch (IOException e) {
-                        LOG.debug("ExpiredCertSensor: could not read {} — {}", relativePath, e.getMessage());
+                    } catch (Exception e) {
+                        // Isolate per-file failures — one bad file never stops the rest
+                        LOG.warn("ExpiredCertSensor: skipping {} — {}", relativePath, e.getMessage());
+                        LOG.debug("ExpiredCertSensor: per-file error detail", e);
                     }
 
                     return FileVisitResult.CONTINUE;
@@ -146,6 +180,7 @@ public class ExpiredCertSensor implements Sensor {
      */
     private void processArchiveBytes(byte[] archiveBytes, String archivePath,
                                      int warningDays, List<String> passwords,
+                                     Severity severityExpired, Severity severityExpiringSoon,
                                      SensorContext context, Path originalFile) {
         try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(archiveBytes))) {
             ZipEntry entry;
@@ -164,16 +199,19 @@ public class ExpiredCertSensor implements Sensor {
                 if (CERT_EXTENSIONS.contains(ext)) {
                     List<CertificateInfo> certs =
                             pemDerParser.parse(new ByteArrayInputStream(entryBytes), entryPath);
-                    reportIssues(certs, originalFile, warningDays, context);
+                    reportIssues(certs, originalFile, warningDays,
+                            severityExpired, severityExpiringSoon, context);
 
                 } else if (KEYSTORE_EXTENSIONS.contains(ext)) {
                     String type = keystoreType(ext);
                     List<CertificateInfo> certs = keyStoreParser.parse(
                             new ByteArrayInputStream(entryBytes), entryPath, type, passwords);
-                    reportIssues(certs, originalFile, warningDays, context);
+                    reportIssues(certs, originalFile, warningDays,
+                            severityExpired, severityExpiringSoon, context);
 
                 } else if (ARCHIVE_EXTENSIONS.contains(ext)) {
-                    processArchiveBytes(entryBytes, entryPath, warningDays, passwords, context, originalFile);
+                    processArchiveBytes(entryBytes, entryPath, warningDays, passwords,
+                            severityExpired, severityExpiringSoon, context, originalFile);
                 }
             }
         } catch (IOException e) {
@@ -190,7 +228,8 @@ public class ExpiredCertSensor implements Sensor {
      * descriptions in the UI. These are external rules — no quality profile or
      * language restriction applies. Issues are always raised for every project.
      */
-    private void registerAdHocRules(SensorContext context) {
+    private void registerAdHocRules(SensorContext context,
+                                    Severity severityExpired, Severity severityExpiringSoon) {
         context.newAdHocRule()
                 .engineId(ExpiredCertRulesDefinition.ENGINE_ID)
                 .ruleId(ExpiredCertRulesDefinition.RULE_EXPIRED)
@@ -198,7 +237,7 @@ public class ExpiredCertSensor implements Sensor {
                 .description("An expired certificate was found in the project workspace. "
                         + "Expired certificates are rejected by TLS clients and will cause connection failures. "
                         + "Replace the certificate immediately.")
-                .severity(Severity.CRITICAL)
+                .severity(severityExpired)
                 .type(RuleType.VULNERABILITY)
                 .save();
 
@@ -209,9 +248,25 @@ public class ExpiredCertSensor implements Sensor {
                 .description("A certificate expiring within the configured warning window was found. "
                         + "Renew it before it expires to avoid service disruption. "
                         + "Warning window is controlled by sonar.expiredcert.warningDays (default: 60 days).")
-                .severity(Severity.MAJOR)
+                .severity(severityExpiringSoon)
                 .type(RuleType.VULNERABILITY)
                 .save();
+    }
+
+    private static Severity resolveSeverity(SensorContext context, String propertyKey, Severity defaultSeverity) {
+        return context.config().get(propertyKey)
+                .map(String::trim)
+                .map(String::toUpperCase)
+                .map(s -> {
+                    try {
+                        return Severity.valueOf(s);
+                    } catch (IllegalArgumentException e) {
+                        LOG.warn("ExpiredCertSensor: invalid severity '{}' for '{}' — using default '{}'",
+                                s, propertyKey, defaultSeverity);
+                        return defaultSeverity;
+                    }
+                })
+                .orElse(defaultSeverity);
     }
 
     // -------------------------------------------------------------------------
@@ -219,7 +274,8 @@ public class ExpiredCertSensor implements Sensor {
     // -------------------------------------------------------------------------
 
     private void reportIssues(List<CertificateInfo> certs, Path file,
-                               int warningDays, SensorContext context) {
+                               int warningDays, Severity severityExpired,
+                               Severity severityExpiringSoon, SensorContext context) {
         LocalDate today     = LocalDate.now();
         LocalDate threshold = today.plusDays(warningDays);
         FileSystem fs       = context.fileSystem();
@@ -232,12 +288,12 @@ public class ExpiredCertSensor implements Sensor {
 
             if (!expiry.isAfter(today)) {
                 ruleId   = ExpiredCertRulesDefinition.RULE_EXPIRED;
-                severity = Severity.CRITICAL;
+                severity = severityExpired;
                 message  = buildMessage(cert, "expired on " + expiry + ". Replace it immediately.");
             } else if (!expiry.isAfter(threshold)) {
                 long daysLeft = ChronoUnit.DAYS.between(today, expiry);
                 ruleId   = ExpiredCertRulesDefinition.RULE_EXPIRING_SOON;
-                severity = Severity.MAJOR;
+                severity = severityExpiringSoon;
                 message  = buildMessage(cert, "expires in " + daysLeft + " days on " + expiry
                         + ". Renew before expiry.");
             } else {

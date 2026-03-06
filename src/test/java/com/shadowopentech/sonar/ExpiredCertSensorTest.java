@@ -165,6 +165,37 @@ class ExpiredCertSensorTest {
     }
 
     @Test
+    void noIssueWhenSensorDisabled(@TempDir Path tempDir) throws Exception {
+        copyResource("expired.pem", tempDir.resolve("expired.pem"));
+
+        SensorContextTester context = SensorContextTester.create(tempDir.toFile());
+        addInputFile(context, tempDir, "expired.pem");
+        context.settings().setProperty(ExpiredCertRulesDefinition.PROPERTY_ENABLED, "false");
+
+        sensor.execute(context);
+
+        assertTrue(context.allExternalIssues().isEmpty(),
+                "Expected no issues when sensor is disabled");
+    }
+
+    @Test
+    void gracefullyHandlesCorruptedFile(@TempDir Path tempDir) throws Exception {
+        // Write a file with a .pem extension but garbage content
+        Files.writeString(tempDir.resolve("corrupt.pem"), "this is not a certificate %%%INVALID%%%");
+
+        // Also place a real expired cert alongside it
+        copyResource("expired.pem", tempDir.resolve("expired.pem"));
+
+        SensorContextTester context = SensorContextTester.create(tempDir.toFile());
+
+        // Should not throw — corrupt file is skipped, valid cert still reported
+        assertDoesNotThrow(() -> sensor.execute(context));
+        assertTrue(context.allExternalIssues().stream().anyMatch(i ->
+                i.ruleId().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)),
+                "Valid expired.pem should still be reported despite corrupt.pem being present");
+    }
+
+    @Test
     void skipsGitDirectory(@TempDir Path tempDir) throws Exception {
         Path gitDir = tempDir.resolve(".git");
         Files.createDirectories(gitDir);
