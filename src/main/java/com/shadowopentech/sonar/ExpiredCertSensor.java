@@ -1,0 +1,299 @@
+package com.shadowopentech.sonar;
+
+import com.shadowopentech.sonar.cert.CertificateInfo;
+import com.shadowopentech.sonar.cert.KeyStoreParser;
+import com.shadowopentech.sonar.cert.PemDerParser;
+import org.sonar.api.batch.fs.FileSystem;
+import org.sonar.api.batch.fs.InputFile;
+import org.sonar.api.batch.sensor.Sensor;
+import org.sonar.api.batch.sensor.SensorContext;
+import org.sonar.api.batch.sensor.SensorDescriptor;
+import org.sonar.api.batch.sensor.issue.NewIssue;
+import org.sonar.api.rule.RuleKey;
+import org.sonar.api.utils.log.Logger;
+import org.sonar.api.utils.log.Loggers;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
+import java.util.*;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+/**
+ * Language-agnostic sensor that walks the full project filesystem,
+ * parses every certificate it finds (including inside archives),
+ * and raises issues for expired or soon-to-expire certificates.
+ */
+public class ExpiredCertSensor implements Sensor {
+
+    private static final Logger LOG = Loggers.get(ExpiredCertSensor.class);
+
+    // File extensions routed to PemDerParser
+    private static final Set<String> CERT_EXTENSIONS = Set.of(
+            "pem", "crt", "cer", "cert", "der", "p7b", "p7c"
+    );
+
+    // File extensions routed to KeyStoreParser
+    private static final Set<String> KEYSTORE_EXTENSIONS = Set.of(
+            "jks", "keystore", "p12", "pfx"
+    );
+
+    // File extensions treated as archives (recursively extracted)
+    private static final Set<String> ARCHIVE_EXTENSIONS = Set.of(
+            "jar", "war", "ear", "zip", "aar"
+    );
+
+    // Directories skipped entirely during filesystem walk
+    private static final Set<String> SKIP_DIRS = Set.of(
+            ".git", "node_modules", "target", "build", ".mvn", ".gradle",
+            ".idea", ".vscode", "__pycache__", ".tox"
+    );
+
+    private final PemDerParser pemDerParser = new PemDerParser();
+    private final KeyStoreParser keyStoreParser = new KeyStoreParser();
+
+    @Override
+    public void describe(SensorDescriptor descriptor) {
+        // No language restriction — runs on every SonarQube project
+        descriptor.name("Expired Certificate Sensor");
+    }
+
+    @Override
+    public void execute(SensorContext context) {
+        int warningDays = context.config()
+                .getInt(ExpiredCertRulesDefinition.PROPERTY_WARNING_DAYS)
+                .orElse(60);
+
+        List<String> passwords = buildPasswordList(context);
+        Path baseDir = context.fileSystem().baseDir().toPath();
+
+        LOG.info("ExpiredCertSensor: scanning {} (warningDays={})", baseDir, warningDays);
+
+        try {
+            Files.walkFileTree(baseDir, new SimpleFileVisitor<>() {
+
+                @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    if (SKIP_DIRS.contains(dir.getFileName().toString())) {
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    String relativePath = baseDir.relativize(file).toString();
+                    String ext = extension(file.getFileName().toString());
+
+                    try {
+                        if (CERT_EXTENSIONS.contains(ext)) {
+                            try (InputStream is = Files.newInputStream(file)) {
+                                List<CertificateInfo> certs = pemDerParser.parse(is, relativePath);
+                                reportIssues(certs, file, warningDays, context);
+                            }
+                        } else if (KEYSTORE_EXTENSIONS.contains(ext)) {
+                            String type = keystoreType(ext);
+                            try (InputStream is = Files.newInputStream(file)) {
+                                List<CertificateInfo> certs =
+                                        keyStoreParser.parse(is, relativePath, type, passwords);
+                                reportIssues(certs, file, warningDays, context);
+                            }
+                        } else if (ARCHIVE_EXTENSIONS.contains(ext)) {
+                            try (InputStream is = Files.newInputStream(file)) {
+                                processArchiveBytes(is.readAllBytes(), relativePath,
+                                        warningDays, passwords, context, file);
+                            }
+                        }
+                    } catch (IOException e) {
+                        LOG.debug("ExpiredCertSensor: could not read {} — {}", relativePath, e.getMessage());
+                    }
+
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    LOG.debug("ExpiredCertSensor: skipping unreadable file {}", file);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException e) {
+            LOG.warn("ExpiredCertSensor: filesystem walk failed — {}", e.getMessage());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Archive handling (recursive, in-memory)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Recursively extracts a ZIP/JAR/WAR/EAR/AAR byte array and processes each entry.
+     * Archives nested inside archives are handled by recursing into this method.
+     *
+     * @param archiveBytes  raw bytes of the archive
+     * @param archivePath   display path of this archive (used in issue messages)
+     * @param originalFile  the top-level {@link Path} on disk (for InputFile lookup)
+     */
+    private void processArchiveBytes(byte[] archiveBytes, String archivePath,
+                                     int warningDays, List<String> passwords,
+                                     SensorContext context, Path originalFile) {
+        try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(archiveBytes))) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (entry.isDirectory()) {
+                    zip.closeEntry();
+                    continue;
+                }
+
+                String entryName  = entry.getName();
+                String entryPath  = archivePath + "!/" + entryName;
+                String ext        = extension(entryName);
+                byte[] entryBytes = readAllBytes(zip);
+                zip.closeEntry();
+
+                if (CERT_EXTENSIONS.contains(ext)) {
+                    List<CertificateInfo> certs =
+                            pemDerParser.parse(new ByteArrayInputStream(entryBytes), entryPath);
+                    reportIssues(certs, originalFile, warningDays, context);
+
+                } else if (KEYSTORE_EXTENSIONS.contains(ext)) {
+                    String type = keystoreType(ext);
+                    List<CertificateInfo> certs = keyStoreParser.parse(
+                            new ByteArrayInputStream(entryBytes), entryPath, type, passwords);
+                    reportIssues(certs, originalFile, warningDays, context);
+
+                } else if (ARCHIVE_EXTENSIONS.contains(ext)) {
+                    processArchiveBytes(entryBytes, entryPath, warningDays, passwords, context, originalFile);
+                }
+            }
+        } catch (IOException e) {
+            LOG.debug("ExpiredCertSensor: could not process archive {} — {}", archivePath, e.getMessage());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue reporting
+    // -------------------------------------------------------------------------
+
+    private void reportIssues(List<CertificateInfo> certs, Path file,
+                               int warningDays, SensorContext context) {
+        LocalDate today     = LocalDate.now();
+        LocalDate threshold = today.plusDays(warningDays);
+        FileSystem fs       = context.fileSystem();
+
+        for (CertificateInfo cert : certs) {
+            LocalDate expiry = cert.getExpiryDate();
+            String ruleKey;
+            String message;
+
+            if (!expiry.isAfter(today)) {
+                ruleKey = ExpiredCertRulesDefinition.RULE_EXPIRED;
+                message = buildMessage(cert, "expired on " + expiry + ". Replace it immediately.");
+            } else if (!expiry.isAfter(threshold)) {
+                long daysLeft = ChronoUnit.DAYS.between(today, expiry);
+                ruleKey = ExpiredCertRulesDefinition.RULE_EXPIRING_SOON;
+                message = buildMessage(cert, "expires in " + daysLeft + " days on " + expiry
+                        + ". Renew before expiry.");
+            } else {
+                continue; // Certificate is healthy — no issue
+            }
+
+            NewIssue issue = context.newIssue()
+                    .forRule(RuleKey.of(ExpiredCertRulesDefinition.REPOSITORY_KEY, ruleKey));
+
+            // Prefer a file-level issue; fall back to module-level for binary/out-of-scope files
+            InputFile inputFile = fs.inputFile(fs.predicates().is(file.toFile()));
+            if (inputFile != null) {
+                issue.at(issue.newLocation()
+                        .on(inputFile)
+                        .message(message));
+            } else {
+                issue.at(issue.newLocation()
+                        .on(context.module())
+                        .message(message));
+            }
+
+            issue.save();
+        }
+    }
+
+    private static String buildMessage(CertificateInfo cert, String suffix) {
+        StringBuilder sb = new StringBuilder("Certificate '")
+                .append(cert.getSubject())
+                .append("'");
+        if (cert.getAlias() != null) {
+            sb.append(" (alias: '").append(cert.getAlias()).append("')");
+        }
+        sb.append(" in '").append(cert.getSourcePath()).append("' ").append(suffix);
+        return sb.toString();
+    }
+
+    // -------------------------------------------------------------------------
+    // Password list construction
+    // -------------------------------------------------------------------------
+
+    /**
+     * Builds the ordered password list:
+     * 1. User-configured passwords from sonar.expiredcert.keystorePasswords
+     * 2. Fallback list from plugin-config.properties
+     */
+    private List<String> buildPasswordList(SensorContext context) {
+        List<String> passwords = new ArrayList<>();
+
+        context.config().get(ExpiredCertRulesDefinition.PROPERTY_KEYSTORE_PASSWORDS)
+                .filter(s -> !s.isBlank())
+                .ifPresent(val -> Arrays.stream(val.split(",", -1))
+                        .map(String::trim)
+                        .forEach(passwords::add));
+
+        try (InputStream is = getClass().getClassLoader()
+                .getResourceAsStream("plugin-config.properties")) {
+            if (is != null) {
+                Properties props = new Properties();
+                props.load(is);
+                String fallback = props.getProperty("keystore.fallback.passwords", "");
+                Arrays.stream(fallback.split(",", -1))
+                        .map(String::trim)
+                        .filter(p -> !passwords.contains(p))
+                        .forEach(passwords::add);
+            }
+        } catch (IOException e) {
+            LOG.warn("ExpiredCertSensor: could not load plugin-config.properties, using minimal fallback");
+            List.of("changeit", "changeme", "password", "")
+                    .stream()
+                    .filter(p -> !passwords.contains(p))
+                    .forEach(passwords::add);
+        }
+
+        return passwords;
+    }
+
+    // -------------------------------------------------------------------------
+    // Utilities
+    // -------------------------------------------------------------------------
+
+    private static String extension(String filename) {
+        int dot = filename.lastIndexOf('.');
+        return dot >= 0 ? filename.substring(dot + 1).toLowerCase(Locale.ROOT) : "";
+    }
+
+    private static String keystoreType(String ext) {
+        return (ext.equals("p12") || ext.equals("pfx")) ? "PKCS12" : "JKS";
+    }
+
+    private static byte[] readAllBytes(InputStream is) throws IOException {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        byte[] block = new byte[8192];
+        int len;
+        while ((len = is.read(block)) > 0) {
+            buf.write(block, 0, len);
+        }
+        return buf.toByteArray();
+    }
+}
