@@ -75,7 +75,7 @@
           <pluginClass>com.shadowopentech.sonar.ExpiredCertPlugin</pluginClass>
           <pluginName>Expired Certificate Rule</pluginName>
           <pluginDescription>Detects SSL/TLS certificate validation bypass patterns in Java code</pluginDescription>
-          <sonarQubeMinVersion>9.9</sonarQubeMinVersion>
+          <pluginApiMinVersion>9.14.0.375</pluginApiMinVersion>
         </configuration>
       </plugin>
 
