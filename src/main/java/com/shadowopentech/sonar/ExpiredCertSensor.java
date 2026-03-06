@@ -5,11 +5,13 @@ import com.shadowopentech.sonar.cert.KeyStoreParser;
 import com.shadowopentech.sonar.cert.PemDerParser;
 import org.sonar.api.batch.fs.FileSystem;
 import org.sonar.api.batch.fs.InputFile;
+import org.sonar.api.batch.rule.Severity;
 import org.sonar.api.batch.sensor.Sensor;
 import org.sonar.api.batch.sensor.SensorContext;
 import org.sonar.api.batch.sensor.SensorDescriptor;
-import org.sonar.api.batch.sensor.issue.NewIssue;
-import org.sonar.api.rule.RuleKey;
+import org.sonar.api.batch.sensor.issue.NewExternalIssue;
+import org.sonar.api.batch.sensor.issue.NewIssueLocation;
+import org.sonar.api.rules.RuleType;
 import org.sonar.api.utils.log.Logger;
 import org.sonar.api.utils.log.Loggers;
 
@@ -74,6 +76,8 @@ public class ExpiredCertSensor implements Sensor {
         Path baseDir = context.fileSystem().baseDir().toPath();
 
         LOG.info("ExpiredCertSensor: scanning {} (warningDays={})", baseDir, warningDays);
+
+        registerAdHocRules(context);
 
         try {
             Files.walkFileTree(baseDir, new SimpleFileVisitor<>() {
@@ -178,6 +182,39 @@ public class ExpiredCertSensor implements Sensor {
     }
 
     // -------------------------------------------------------------------------
+    // Ad-hoc rule registration (once per scan, language-agnostic)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Registers rule metadata via NewAdHocRule so SonarQube shows names and
+     * descriptions in the UI. These are external rules — no quality profile or
+     * language restriction applies. Issues are always raised for every project.
+     */
+    private void registerAdHocRules(SensorContext context) {
+        context.newAdHocRule()
+                .engineId(ExpiredCertRulesDefinition.ENGINE_ID)
+                .ruleId(ExpiredCertRulesDefinition.RULE_EXPIRED)
+                .name("Certificates must not be expired")
+                .description("An expired certificate was found in the project workspace. "
+                        + "Expired certificates are rejected by TLS clients and will cause connection failures. "
+                        + "Replace the certificate immediately.")
+                .severity(Severity.CRITICAL)
+                .type(RuleType.VULNERABILITY)
+                .save();
+
+        context.newAdHocRule()
+                .engineId(ExpiredCertRulesDefinition.ENGINE_ID)
+                .ruleId(ExpiredCertRulesDefinition.RULE_EXPIRING_SOON)
+                .name("Certificates should not be expiring soon")
+                .description("A certificate expiring within the configured warning window was found. "
+                        + "Renew it before it expires to avoid service disruption. "
+                        + "Warning window is controlled by sonar.expiredcert.warningDays (default: 60 days).")
+                .severity(Severity.MAJOR)
+                .type(RuleType.VULNERABILITY)
+                .save();
+    }
+
+    // -------------------------------------------------------------------------
     // Issue reporting
     // -------------------------------------------------------------------------
 
@@ -189,37 +226,40 @@ public class ExpiredCertSensor implements Sensor {
 
         for (CertificateInfo cert : certs) {
             LocalDate expiry = cert.getExpiryDate();
-            String ruleKey;
+            String ruleId;
+            Severity severity;
             String message;
 
             if (!expiry.isAfter(today)) {
-                ruleKey = ExpiredCertRulesDefinition.RULE_EXPIRED;
-                message = buildMessage(cert, "expired on " + expiry + ". Replace it immediately.");
+                ruleId   = ExpiredCertRulesDefinition.RULE_EXPIRED;
+                severity = Severity.CRITICAL;
+                message  = buildMessage(cert, "expired on " + expiry + ". Replace it immediately.");
             } else if (!expiry.isAfter(threshold)) {
                 long daysLeft = ChronoUnit.DAYS.between(today, expiry);
-                ruleKey = ExpiredCertRulesDefinition.RULE_EXPIRING_SOON;
-                message = buildMessage(cert, "expires in " + daysLeft + " days on " + expiry
+                ruleId   = ExpiredCertRulesDefinition.RULE_EXPIRING_SOON;
+                severity = Severity.MAJOR;
+                message  = buildMessage(cert, "expires in " + daysLeft + " days on " + expiry
                         + ". Renew before expiry.");
             } else {
                 continue; // Certificate is healthy — no issue
             }
 
-            NewIssue issue = context.newIssue()
-                    .forRule(RuleKey.of(ExpiredCertRulesDefinition.REPOSITORY_KEY, ruleKey));
+            NewExternalIssue issue = context.newExternalIssue()
+                    .engineId(ExpiredCertRulesDefinition.ENGINE_ID)
+                    .ruleId(ruleId)
+                    .severity(severity)
+                    .type(RuleType.VULNERABILITY);
 
             // Prefer a file-level issue; fall back to module-level for binary/out-of-scope files
             InputFile inputFile = fs.inputFile(fs.predicates().is(file.toFile()));
+            NewIssueLocation location = issue.newLocation().message(message);
             if (inputFile != null) {
-                issue.at(issue.newLocation()
-                        .on(inputFile)
-                        .message(message));
+                location.on(inputFile);
             } else {
-                issue.at(issue.newLocation()
-                        .on(context.module())
-                        .message(message));
+                location.on(context.module());
             }
 
-            issue.save();
+            issue.at(location).save();
         }
     }
 

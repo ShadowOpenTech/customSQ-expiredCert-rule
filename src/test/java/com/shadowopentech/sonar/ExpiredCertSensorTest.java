@@ -7,8 +7,6 @@ import org.sonar.api.batch.fs.internal.DefaultFileSystem;
 import org.sonar.api.batch.fs.internal.TestInputFileBuilder;
 import org.sonar.api.batch.sensor.internal.DefaultSensorDescriptor;
 import org.sonar.api.batch.sensor.internal.SensorContextTester;
-import org.sonar.api.batch.sensor.issue.Issue;
-
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
@@ -53,10 +51,9 @@ class ExpiredCertSensorTest {
 
         sensor.execute(context);
 
-        Collection<Issue> issues = context.allIssues();
-        assertFalse(issues.isEmpty(), "Expected issue for expired cert");
-        assertTrue(issues.stream().anyMatch(i ->
-                i.ruleKey().rule().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)));
+        assertFalse(context.allExternalIssues().isEmpty(), "Expected issue for expired cert");
+        assertTrue(context.allExternalIssues().stream().anyMatch(i ->
+                i.ruleId().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)));
     }
 
     @Test
@@ -68,8 +65,8 @@ class ExpiredCertSensorTest {
 
         sensor.execute(context);
 
-        assertTrue(context.allIssues().stream().anyMatch(i ->
-                i.ruleKey().rule().equals(ExpiredCertRulesDefinition.RULE_EXPIRING_SOON)),
+        assertTrue(context.allExternalIssues().stream().anyMatch(i ->
+                i.ruleId().equals(ExpiredCertRulesDefinition.RULE_EXPIRING_SOON)),
                 "Expected expiring-soon issue");
     }
 
@@ -82,7 +79,7 @@ class ExpiredCertSensorTest {
 
         sensor.execute(context);
 
-        assertTrue(context.allIssues().isEmpty(), "Expected no issues for valid cert");
+        assertTrue(context.allExternalIssues().isEmpty(), "Expected no issues for valid cert");
     }
 
     @Test
@@ -94,8 +91,8 @@ class ExpiredCertSensorTest {
 
         sensor.execute(context);
 
-        assertTrue(context.allIssues().stream().anyMatch(i ->
-                i.ruleKey().rule().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)),
+        assertTrue(context.allExternalIssues().stream().anyMatch(i ->
+                i.ruleId().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)),
                 "Expected expired issue from chain PEM");
     }
 
@@ -112,8 +109,8 @@ class ExpiredCertSensorTest {
 
         sensor.execute(context);
 
-        assertTrue(context.allIssues().stream().anyMatch(i ->
-                i.ruleKey().rule().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)),
+        assertTrue(context.allExternalIssues().stream().anyMatch(i ->
+                i.ruleId().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)),
                 "Expected expired issue from JKS");
     }
 
@@ -129,8 +126,8 @@ class ExpiredCertSensorTest {
 
         sensor.execute(context);
 
-        assertTrue(context.allIssues().stream().anyMatch(i ->
-                i.ruleKey().rule().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)),
+        assertTrue(context.allExternalIssues().stream().anyMatch(i ->
+                i.ruleId().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)),
                 "Expected expired issue from cert inside JAR");
     }
 
@@ -142,8 +139,8 @@ class ExpiredCertSensorTest {
 
         sensor.execute(context);
 
-        assertTrue(context.allIssues().stream().anyMatch(i ->
-                i.ruleKey().rule().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)),
+        assertTrue(context.allExternalIssues().stream().anyMatch(i ->
+                i.ruleId().equals(ExpiredCertRulesDefinition.RULE_EXPIRED)),
                 "Expected expired issue from cert inside nested archive (zip -> jar -> pem)");
     }
 
@@ -163,7 +160,7 @@ class ExpiredCertSensorTest {
 
         sensor.execute(context);
 
-        assertTrue(context.allIssues().isEmpty(),
+        assertTrue(context.allExternalIssues().isEmpty(),
                 "Expected no issue when warningDays=10 and cert expires in ~30 days");
     }
 
@@ -177,7 +174,7 @@ class ExpiredCertSensorTest {
 
         sensor.execute(context);
 
-        assertTrue(context.allIssues().isEmpty(), "Must not scan inside .git directory");
+        assertTrue(context.allExternalIssues().isEmpty(), "Must not scan inside .git directory");
     }
 
     // -------------------------------------------------------------------------

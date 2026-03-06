@@ -10,7 +10,6 @@ public class ExpiredCertPlugin implements Plugin {
 
     @Override
     public void define(Context context) {
-        context.addExtension(ExpiredCertRulesDefinition.class);
         context.addExtension(ExpiredCertSensor.class);
         context.addExtensions(java.util.Arrays.asList(ExpiredCertRulesDefinition.propertyDefinitions()));
     }
