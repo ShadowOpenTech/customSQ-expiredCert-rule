@@ -6,18 +6,23 @@ A custom SonarQube plugin that scans your entire project workspace for certifica
 
 ## What It Does
 
-This plugin registers a **language-agnostic file sensor**, meaning it runs on every SonarQube project regardless of the primary language (Java, Python, JavaScript, etc.). It recursively scans all project files, extracts certificates from every supported format, evaluates expiry dates, and raises issues directly on the certificate file.
+This plugin registers a **language-agnostic file sensor** that runs on every SonarQube project regardless of the primary language (Java, Python, JavaScript, Go, etc.). It recursively scans all project files, extracts certificates from every supported format, evaluates expiry dates, and raises issues directly on the certificate file.
+
+Issues are raised using SonarQube's **External Issue** mechanism (`NewExternalIssue` + `NewAdHocRule`), which means:
+- No quality profile activation required
+- Works for all languages automatically
+- Issues always appear regardless of which rules are enabled
 
 ---
 
 ## Rules
 
-| Rule Key | Severity | Description |
+| Rule Key | Default Severity | Description |
 |---|---|---|
-| `expiredcertrule:CertificateExpired` | CRITICAL | Certificate has already passed its expiry date |
-| `expiredcertrule:CertificateExpiringSoon` | MAJOR | Certificate expires within the configured warning window |
+| `expiredcertrule:CertificateExpired` | INFO | Certificate has already passed its expiry date |
+| `expiredcertrule:CertificateExpiringSoon` | INFO | Certificate expires within the configured warning window |
 
-Both rules appear under the **ShadowOpentech Certificate Rules** repository in SonarQube Quality Profiles.
+Severities are configurable by a SonarQube administrator via the global Administration UI. See [Configuration](#configuration).
 
 ---
 
@@ -36,40 +41,72 @@ Both rules appear under the **ShadowOpentech Certificate Rules** repository in S
 
 ## Issue Messages
 
-Issues are raised at file level with full certificate details:
+Issues are raised at file level with full certificate details, including keystore alias and nested archive path where applicable:
 
 > **Expired:** `Certificate 'CN=api.example.com, O=Example Corp' (alias: 'server-cert') in 'truststore.jks' expired on 2025-01-15. Replace it immediately.`
 
 > **Expiring Soon:** `Certificate 'CN=api.example.com, O=Example Corp' (alias: 'server-cert') in 'truststore.jks' expires in 42 days on 2026-04-17. Renew before expiry.`
 
+> **Nested archive:** `Certificate '...' in 'app.war!/WEB-INF/lib/crypto.jar!/certs/server.pem' expired on 2025-01-01. Replace it immediately.`
+
 ---
 
 ## Configuration
 
-### SonarQube Properties
+All 5 properties are managed exclusively through the **SonarQube global Administration UI**:
 
-Set these in your `sonar-project.properties` or via the SonarQube UI (Administration > Configuration):
+> **Administration → Configuration → General Settings → Expired Certificate Rule**
+
+They are **not** exposed as project-level settings and will not appear in project configuration pages.
 
 | Property | Default | Description |
 |---|---|---|
-| `sonar.expiredcert.warningDays` | `60` | Days ahead of expiry to raise a warning issue |
-| `sonar.expiredcert.keystorePasswords` | _(see below)_ | Comma-separated list of passwords to try when opening JKS/PKCS12 keystores |
+| `sonar.expiredcert.enabled` | `true` | Set to `false` to disable the sensor. Takes effect on the next scan — no restart needed. |
+| `sonar.expiredcert.severity.expired` | `INFO` | Severity for already-expired certificates. Accepted: `BLOCKER`, `CRITICAL`, `MAJOR`, `MINOR`, `INFO`. |
+| `sonar.expiredcert.severity.expiringSoon` | `INFO` | Severity for certificates expiring within the warning window. Same accepted values. |
+| `sonar.expiredcert.warningDays` | `60` | Days before expiry to raise a warning issue. Default sourced from `plugin-config.properties`. |
+| `sonar.expiredcert.keystorePasswords` | _(fallback list)_ | Comma-separated passwords tried when opening JKS/PKCS12 keystores. Default sourced from `plugin-config.properties`. |
 
-### Keystore Passwords
+### Keystore password resolution order
 
-The plugin tries passwords in this order:
+1. Passwords set in `sonar.expiredcert.keystorePasswords` (via admin UI)
+2. Built-in fallback list from `src/main/resources/plugin-config.properties`
 
-1. Passwords listed in `sonar.expiredcert.keystorePasswords` (user-defined)
-2. The built-in hardcoded fallback list (maintained in `src/main/resources/plugin-config.properties`)
+### Updating defaults without changing logic
 
-To update the hardcoded fallback list, edit the `keystore.fallback.passwords` key in `src/main/resources/plugin-config.properties`. This is the single source of truth for default passwords — no recompilation of logic is needed, only update the config file and rebuild the plugin JAR.
-
-### Example `sonar-project.properties`
+`src/main/resources/plugin-config.properties` is the single source of truth for default `warningDays` and the fallback password list. Edit the relevant keys and rebuild the JAR — no logic changes needed:
 
 ```properties
-sonar.expiredcert.warningDays=60
-sonar.expiredcert.keystorePasswords=myCustomPass,anotherPass
+expiredcert.warning.days=60
+keystore.fallback.passwords=changeit,changeme,password,...
 ```
+
+---
+
+## Graceful Failure
+
+The plugin is designed to never cause a scan to fail:
+
+- Any unexpected exception during the scan is caught at the top level, logged as a warning, and the sensor exits cleanly
+- A corrupted or unreadable file is skipped individually — it never aborts the scan of remaining files
+- Other sensors and the overall scan result are always unaffected
+
+---
+
+## CI / CD
+
+GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pull request to `main`:
+
+| Job | Trigger | Description |
+|---|---|---|
+| **Build & Test** | Push + PR | Runs `mvn clean test` on Java 17 |
+| **Pre-release** | Push to `main` only (after tests pass) | Builds plugin JAR and publishes a GitHub pre-release tagged `v{version}-pre.{run_number}` |
+
+### Promoting to an official release
+
+1. Go to **Releases** in this repo
+2. Find the pre-release to promote
+3. Click **Edit** → uncheck **This is a pre-release** → **Update release**
 
 ---
 
@@ -77,36 +114,42 @@ sonar.expiredcert.keystorePasswords=myCustomPass,anotherPass
 
 ```
 customSQ-expiredCert-rule/
+├── .github/workflows/ci.yml             # CI: test + pre-release on every push to main
 ├── pom.xml
 ├── README.md
 └── src/
     ├── main/
     │   ├── java/com/shadowopentech/sonar/
-    │   │   ├── ExpiredCertPlugin.java            # Entry point — registers all extensions
-    │   │   ├── ExpiredCertRulesDefinition.java   # Declares the 2 rules + properties
-    │   │   ├── ExpiredCertSensor.java            # Core sensor — finds, parses, reports
+    │   │   ├── ExpiredCertPlugin.java            # Entry point — registers sensor + properties
+    │   │   ├── ExpiredCertRulesDefinition.java   # Constants + all 5 PropertyDefinition beans
+    │   │   ├── ExpiredCertSensor.java            # Core sensor — walk, parse, report, graceful failure
     │   │   └── cert/
-    │   │       ├── CertificateInfo.java          # Data class: subject, alias, expiry, file
+    │   │       ├── CertificateInfo.java          # Data class: subject, alias, expiry, source path
     │   │       ├── PemDerParser.java             # Parses PEM / DER / PKCS7
-    │   │       └── KeyStoreParser.java           # Parses JKS / PKCS12 with password fallback
+    │   │       └── KeyStoreParser.java           # Parses JKS / PKCS12 with ordered password fallback
     │   └── resources/
-    │       └── plugin-config.properties          # Default warning days + fallback passwords
+    │       └── plugin-config.properties          # Default warningDays + fallback keystore passwords
     └── test/
         ├── java/com/shadowopentech/sonar/
-        │   └── ExpiredCertSensorTest.java
+        │   ├── ExpiredCertSensorTest.java        # Sensor integration tests (13 tests)
+        │   └── cert/
+        │       ├── PemDerParserTest.java         # Parser unit tests (6 tests)
+        │       └── KeyStoreParserTest.java       # Keystore parser unit tests (6 tests)
         └── resources/
             ├── expired.pem
             ├── expiring-soon.pem
             ├── valid.pem
+            ├── chain.pem
             ├── test-truststore.jks
-            └── test-archive.jar
+            ├── test-archive.jar
+            └── nested-archive.zip
 ```
 
 ---
 
 ## Build & Install
 
-**Requirements:** Java 11+, Maven 3.6+
+**Requirements:** Java 17+, Maven 3.6+
 
 ```bash
 mvn clean package
@@ -122,5 +165,5 @@ Copy the generated JAR from `target/` to `$SONARQUBE_HOME/extensions/plugins/` a
 |---|---|
 | SonarQube | 9.9 LTS+ |
 | SonarJava plugin | 7.30+ |
-| Java (build) | 11+ |
+| Java (build) | 17+ |
 | Languages scanned | All (language-agnostic) |
