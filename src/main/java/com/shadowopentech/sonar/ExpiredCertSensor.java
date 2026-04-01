@@ -136,8 +136,12 @@ public class ExpiredCertSensor implements Sensor {
                             try (InputStream is = Files.newInputStream(file)) {
                                 List<CertificateInfo> certs =
                                         keyStoreParser.parse(is, relativePath, type, passwords);
-                                reportIssues(certs, file, warningDays,
-                                        severityExpired, severityExpiringSoon, context);
+                                if (certs == null) {
+                                    reportPasswordFailure(relativePath, file, context);
+                                } else {
+                                    reportIssues(certs, file, warningDays,
+                                            severityExpired, severityExpiringSoon, context);
+                                }
                             }
                         } else if (ARCHIVE_EXTENSIONS.contains(ext)) {
                             try (InputStream is = Files.newInputStream(file)) {
@@ -206,8 +210,12 @@ public class ExpiredCertSensor implements Sensor {
                     String type = keystoreType(ext);
                     List<CertificateInfo> certs = keyStoreParser.parse(
                             new ByteArrayInputStream(entryBytes), entryPath, type, passwords);
-                    reportIssues(certs, originalFile, warningDays,
-                            severityExpired, severityExpiringSoon, context);
+                    if (certs == null) {
+                        reportPasswordFailure(entryPath, originalFile, context);
+                    } else {
+                        reportIssues(certs, originalFile, warningDays,
+                                severityExpired, severityExpiringSoon, context);
+                    }
 
                 } else if (ARCHIVE_EXTENSIONS.contains(ext)) {
                     processArchiveBytes(entryBytes, entryPath, warningDays, passwords,
@@ -249,6 +257,17 @@ public class ExpiredCertSensor implements Sensor {
                         + "Renew it before it expires to avoid service disruption. "
                         + "Warning window is controlled by sonar.expiredcert.warningDays (default: 60 days).")
                 .severity(severityExpiringSoon)
+                .type(RuleType.VULNERABILITY)
+                .save();
+
+        context.newAdHocRule()
+                .engineId(ExpiredCertRulesDefinition.ENGINE_ID)
+                .ruleId(ExpiredCertRulesDefinition.RULE_PASSWORD_FAILED)
+                .name("Keystore could not be opened with any known password")
+                .description("A keystore file was found but none of the configured or fallback passwords "
+                        + "could open it. The certificates inside could not be inspected for expiry. "
+                        + "Add the correct password to sonar.expiredcert.keystorePasswords in the admin UI.")
+                .severity(Severity.INFO)
                 .type(RuleType.VULNERABILITY)
                 .save();
     }
@@ -328,6 +347,34 @@ public class ExpiredCertSensor implements Sensor {
         }
         sb.append(" in '").append(cert.getSourcePath()).append("' ").append(suffix);
         return sb.toString();
+    }
+
+    /**
+     * Raises an INFO-level issue when no password in the dictionary could open a keystore.
+     */
+    private void reportPasswordFailure(String keystorePath, Path file, SensorContext context) {
+        LOG.warn("ExpiredCertSensor: could not open keystore '{}' — no password matched", keystorePath);
+
+        String message = "Keystore '" + keystorePath + "' could not be opened with any known password. "
+                + "Certificates inside were not inspected. "
+                + "Add the correct password to sonar.expiredcert.keystorePasswords.";
+
+        NewExternalIssue issue = context.newExternalIssue()
+                .engineId(ExpiredCertRulesDefinition.ENGINE_ID)
+                .ruleId(ExpiredCertRulesDefinition.RULE_PASSWORD_FAILED)
+                .severity(Severity.INFO)
+                .type(RuleType.VULNERABILITY);
+
+        InputFile inputFile = context.fileSystem()
+                .inputFile(context.fileSystem().predicates().is(file.toFile()));
+        NewIssueLocation location = issue.newLocation().message(message);
+        if (inputFile != null) {
+            location.on(inputFile);
+        } else {
+            location.on(context.module());
+        }
+
+        issue.at(location).save();
     }
 
     // -------------------------------------------------------------------------

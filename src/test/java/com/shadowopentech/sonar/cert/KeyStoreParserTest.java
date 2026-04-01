@@ -60,11 +60,11 @@ class KeyStoreParserTest {
     }
 
     @Test
-    void returnsEmptyOnWrongPassword() throws Exception {
+    void returnsNullOnWrongPassword() throws Exception {
         try (InputStream is = resource("test-truststore.jks")) {
             List<CertificateInfo> certs = parser.parse(is, "test-truststore.jks", "JKS",
                     List.of("wrongpassword", "alsoWrong"));
-            assertTrue(certs.isEmpty(), "Expected empty result for wrong passwords");
+            assertNull(certs, "Expected null when no password matches");
         }
     }
 
@@ -79,9 +79,9 @@ class KeyStoreParserTest {
     }
 
     @Test
-    void returnsEmptyForGarbageBytes() {
+    void returnsNullForGarbageBytes() {
         InputStream is = new java.io.ByteArrayInputStream("not a keystore".getBytes());
         List<CertificateInfo> certs = parser.parse(is, "bad.jks", "JKS", List.of("changeit"));
-        assertTrue(certs.isEmpty());
+        assertNull(certs, "Expected null for unreadable keystore");
     }
 }

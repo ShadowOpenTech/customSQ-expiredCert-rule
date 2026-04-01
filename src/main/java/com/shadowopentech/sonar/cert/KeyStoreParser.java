@@ -41,7 +41,9 @@ public class KeyStoreParser {
             }
         }
 
-        return Collections.emptyList();
+        // All passwords failed — return null so the caller can distinguish this
+        // from "opened successfully but contained no certificates" (empty list)
+        return null;
     }
 
     /**
@@ -53,7 +55,9 @@ public class KeyStoreParser {
                                            String keystoreType, String password) {
         try {
             KeyStore keyStore = KeyStore.getInstance(keystoreType);
-            char[] pwd = (password == null || password.isEmpty()) ? null : password.toCharArray();
+            // Use toCharArray() even for empty strings — passing null to keyStore.load()
+            // skips integrity verification, which would make any keystore "openable"
+            char[] pwd = password == null ? new char[0] : password.toCharArray();
             keyStore.load(new ByteArrayInputStream(data), pwd);
 
             List<CertificateInfo> result = new ArrayList<>();

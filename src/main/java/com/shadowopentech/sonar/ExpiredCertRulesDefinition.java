@@ -28,6 +28,7 @@ public class ExpiredCertRulesDefinition {
 
     public static final String RULE_EXPIRED       = "CertificateExpired";
     public static final String RULE_EXPIRING_SOON = "CertificateExpiringSoon";
+    public static final String RULE_PASSWORD_FAILED = "KeystorePasswordFailed";
 
     // ── Property keys ────────────────────────────────────────────────────────
     public static final String PROPERTY_ENABLED              = "sonar.expiredcert.enabled";

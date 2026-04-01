@@ -21,8 +21,9 @@ Issues are raised using SonarQube's **External Issue** mechanism (`NewExternalIs
 |---|---|---|
 | `expiredcertrule:CertificateExpired` | INFO | Certificate has already passed its expiry date |
 | `expiredcertrule:CertificateExpiringSoon` | INFO | Certificate expires within the configured warning window |
+| `expiredcertrule:KeystorePasswordFailed` | INFO | Keystore could not be opened with any known password |
 
-Severities are configurable by a SonarQube administrator via the global Administration UI. See [Configuration](#configuration).
+Severities for `CertificateExpired` and `CertificateExpiringSoon` are configurable by a SonarQube administrator via the global Administration UI. See [Configuration](#configuration). `KeystorePasswordFailed` is always raised at INFO level.
 
 ---
 
@@ -49,6 +50,8 @@ Issues are raised at file level with full certificate details, including keystor
 
 > **Nested archive:** `Certificate '...' in 'app.war!/WEB-INF/lib/crypto.jar!/certs/server.pem' expired on 2025-01-01. Replace it immediately.`
 
+> **Password failed:** `Keystore 'certs/locked-keystore.jks' could not be opened with any known password. Certificates inside were not inspected. Add the correct password to sonar.expiredcert.keystorePasswords.`
+
 ---
 
 ## Configuration
@@ -71,6 +74,8 @@ They are **not** exposed as project-level settings and will not appear in projec
 
 1. Passwords set in `sonar.expiredcert.keystorePasswords` (via admin UI)
 2. Built-in fallback list from `src/main/resources/plugin-config.properties`
+
+If none of the passwords can open a keystore, a `KeystorePasswordFailed` issue (INFO) is raised so that the unopened keystore does not go unnoticed. Add the correct password to `sonar.expiredcert.keystorePasswords` to resolve it.
 
 ### Updating defaults without changing logic
 
