@@ -7,6 +7,7 @@ import org.sonar.api.batch.fs.internal.DefaultFileSystem;
 import org.sonar.api.batch.fs.internal.TestInputFileBuilder;
 import org.sonar.api.batch.sensor.internal.DefaultSensorDescriptor;
 import org.sonar.api.batch.sensor.internal.SensorContextTester;
+import org.sonar.api.batch.rule.Severity;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
@@ -206,6 +207,56 @@ class ExpiredCertSensorTest {
         sensor.execute(context);
 
         assertTrue(context.allExternalIssues().isEmpty(), "Must not scan inside .git directory");
+    }
+
+    @Test
+    void projectOverrideAppliesWhenAllowed(@TempDir Path tempDir) throws Exception {
+        copyResource("expired.pem", tempDir.resolve("expired.pem"));
+
+        SensorContextTester context = SensorContextTester.create(tempDir.toFile());
+        addInputFile(context, tempDir, "expired.pem");
+        context.settings().setProperty(ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRED, "INFO");
+        context.settings().setProperty(ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRED_OVERRIDE, "CRITICAL");
+        // allowProjectOverrides defaults to true
+
+        sensor.execute(context);
+
+        assertTrue(context.allExternalIssues().stream()
+                .filter(i -> i.ruleId().equals(ExpiredCertRulesDefinition.RULE_EXPIRED))
+                .anyMatch(i -> i.severity() == Severity.CRITICAL),
+                "Project override should win when per-project overrides are allowed");
+    }
+
+    @Test
+    void projectOverrideIgnoredWhenEnforcingGlobal(@TempDir Path tempDir) throws Exception {
+        copyResource("expired.pem", tempDir.resolve("expired.pem"));
+
+        SensorContextTester context = SensorContextTester.create(tempDir.toFile());
+        addInputFile(context, tempDir, "expired.pem");
+        context.settings().setProperty(ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRED, "BLOCKER");
+        context.settings().setProperty(ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRED_OVERRIDE, "INFO");
+        context.settings().setProperty(ExpiredCertRulesDefinition.PROPERTY_ALLOW_PROJECT_OVERRIDES, "false");
+
+        sensor.execute(context);
+
+        assertTrue(context.allExternalIssues().stream()
+                .filter(i -> i.ruleId().equals(ExpiredCertRulesDefinition.RULE_EXPIRED))
+                .anyMatch(i -> i.severity() == Severity.BLOCKER),
+                "Global severity must be enforced and the override ignored when overrides are disabled");
+    }
+
+    @Test
+    void expiredMessageReportsHowLongAgo(@TempDir Path tempDir) throws Exception {
+        copyResource("expired.pem", tempDir.resolve("expired.pem"));
+
+        SensorContextTester context = SensorContextTester.create(tempDir.toFile());
+        addInputFile(context, tempDir, "expired.pem");
+
+        sensor.execute(context);
+
+        assertTrue(context.allExternalIssues().stream()
+                .anyMatch(i -> i.primaryLocation().message().contains("days ago")),
+                "Expired-cert message should report how long ago it expired");
     }
 
     // -------------------------------------------------------------------------

@@ -23,7 +23,7 @@ Issues are raised using SonarQube's **External Issue** mechanism (`NewExternalIs
 | `expiredcertrule:CertificateExpiringSoon` | INFO | Certificate expires within the configured warning window |
 | `expiredcertrule:KeystorePasswordFailed` | INFO | Keystore could not be opened with any known password |
 
-Severities for `CertificateExpired` and `CertificateExpiringSoon` are configurable by a SonarQube administrator via the global Administration UI. See [Configuration](#configuration). `KeystorePasswordFailed` is always raised at INFO level.
+Severities for `CertificateExpired` and `CertificateExpiringSoon` are configurable globally and, optionally, per project (with a global master toggle to enforce the global value everywhere). See [Configuration](#configuration). `KeystorePasswordFailed` is always raised at INFO level.
 
 ---
 
@@ -56,24 +56,37 @@ Issues are raised at file level with full certificate details, including keystor
 
 ## Configuration
 
-All 5 properties are managed exclusively through the **SonarQube global Administration UI**:
+### Global settings
+
+Managed through the **SonarQube global Administration UI**:
 
 > **Administration → Configuration → General Settings → Expired Certificate Rule**
-
-They are **not** exposed as project-level settings and will not appear in project configuration pages.
 
 | Property | Default | Description |
 |---|---|---|
 | `sonar.expiredcert.enabled` | `true` | Set to `false` to disable the sensor. Takes effect on the next scan — no restart needed. |
-| `sonar.expiredcert.severity.expired` | `INFO` | Severity for already-expired certificates. Accepted: `BLOCKER`, `CRITICAL`, `MAJOR`, `MINOR`, `INFO`. |
-| `sonar.expiredcert.severity.expiringSoon` | `INFO` | Severity for certificates expiring within the warning window. Same accepted values. |
+| `sonar.expiredcert.severity.expired` | `INFO` | **Global** severity for already-expired certificates. Accepted: `BLOCKER`, `CRITICAL`, `MAJOR`, `MINOR`, `INFO`. |
+| `sonar.expiredcert.severity.expiringSoon` | `INFO` | **Global** severity for certificates expiring within the warning window. Same accepted values. |
+| `sonar.expiredcert.severity.allowProjectOverrides` | `true` | **Master toggle.** When `false`, every project uses the global severities above and all per-project overrides are ignored. |
 | `sonar.expiredcert.warningDays` | `60` | Days before expiry to raise a warning issue. Default sourced from `plugin-config.properties`. |
 | `sonar.expiredcert.keystorePasswords` | _(fallback list)_ | Comma-separated passwords tried when opening JKS/PKCS12 keystores. Default sourced from `plugin-config.properties`. |
+
+### Per-project settings
+
+Set on an individual project: **Project → Administration → General Settings → Expired Certificate Rule**. These appear **only** on project pages (not globally) and are honoured only while `allowProjectOverrides` is `true`.
+
+| Property | Description |
+|---|---|
+| `sonar.expiredcert.severity.expired.override` | Per-project severity for expired certificates. Leave blank to inherit the global value. |
+| `sonar.expiredcert.severity.expiringSoon.override` | Per-project severity for expiring-soon certificates. Leave blank to inherit the global value. |
+
+**Severity resolution:** project override (if set and overrides allowed) → global severity → built-in default (`INFO`). Setting `allowProjectOverrides=false` enforces the global severity everywhere — useful for an org-wide rollout (e.g. flip every project to `CRITICAL` at once).
 
 ### Keystore password resolution order
 
 1. Passwords set in `sonar.expiredcert.keystorePasswords` (via admin UI)
-2. Built-in fallback list from `src/main/resources/plugin-config.properties`
+2. The keystore's **own file name**, and its name without extension (e.g. `server.jks` → `server.jks`, `server`)
+3. Built-in fallback list from `src/main/resources/plugin-config.properties`
 
 If none of the passwords can open a keystore, a `KeystorePasswordFailed` issue (INFO) is raised so that the unopened keystore does not go unnoticed. Add the correct password to `sonar.expiredcert.keystorePasswords` to resolve it.
 

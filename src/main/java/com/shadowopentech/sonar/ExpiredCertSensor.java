@@ -98,13 +98,21 @@ public class ExpiredCertSensor implements Sensor {
         List<String> passwords = buildPasswordList(context);
         Path baseDir = context.fileSystem().baseDir().toPath();
 
-        Severity severityExpired      = resolveSeverity(context,
-                ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRED, Severity.INFO);
-        Severity severityExpiringSoon = resolveSeverity(context,
-                ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRING_SOON, Severity.INFO);
+        boolean allowProjectOverrides = context.config()
+                .getBoolean(ExpiredCertRulesDefinition.PROPERTY_ALLOW_PROJECT_OVERRIDES)
+                .orElse(true);
 
-        LOG.info("ExpiredCertSensor: scanning {} (warningDays={}, severityExpired={}, severityExpiringSoon={})",
-                baseDir, warningDays, severityExpired, severityExpiringSoon);
+        Severity severityExpired      = resolveSeverity(context,
+                ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRED,
+                ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRED_OVERRIDE,
+                allowProjectOverrides, Severity.INFO);
+        Severity severityExpiringSoon = resolveSeverity(context,
+                ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRING_SOON,
+                ExpiredCertRulesDefinition.PROPERTY_SEVERITY_EXPIRING_SOON_OVERRIDE,
+                allowProjectOverrides, Severity.INFO);
+
+        LOG.info("ExpiredCertSensor: scanning {} (warningDays={}, severityExpired={}, severityExpiringSoon={}, allowProjectOverrides={})",
+                baseDir, warningDays, severityExpired, severityExpiringSoon, allowProjectOverrides);
 
         registerAdHocRules(context, severityExpired, severityExpiringSoon);
 
@@ -133,9 +141,10 @@ public class ExpiredCertSensor implements Sensor {
                             }
                         } else if (KEYSTORE_EXTENSIONS.contains(ext)) {
                             String type = keystoreType(ext);
+                            List<String> pw = withFileNamePasswords(file.getFileName().toString(), passwords);
                             try (InputStream is = Files.newInputStream(file)) {
                                 List<CertificateInfo> certs =
-                                        keyStoreParser.parse(is, relativePath, type, passwords);
+                                        keyStoreParser.parse(is, relativePath, type, pw);
                                 if (certs == null) {
                                     reportPasswordFailure(relativePath, file, context);
                                 } else {
@@ -208,8 +217,10 @@ public class ExpiredCertSensor implements Sensor {
 
                 } else if (KEYSTORE_EXTENSIONS.contains(ext)) {
                     String type = keystoreType(ext);
+                    String entryFileName = entryName.substring(entryName.lastIndexOf('/') + 1);
+                    List<String> pw = withFileNamePasswords(entryFileName, passwords);
                     List<CertificateInfo> certs = keyStoreParser.parse(
-                            new ByteArrayInputStream(entryBytes), entryPath, type, passwords);
+                            new ByteArrayInputStream(entryBytes), entryPath, type, pw);
                     if (certs == null) {
                         reportPasswordFailure(entryPath, originalFile, context);
                     } else {
@@ -272,20 +283,42 @@ public class ExpiredCertSensor implements Sensor {
                 .save();
     }
 
-    private static Severity resolveSeverity(SensorContext context, String propertyKey, Severity defaultSeverity) {
-        return context.config().get(propertyKey)
+    /**
+     * Resolves the effective severity for a rule.
+     *
+     * <p>The global severity (a global-only property) is always read first. When project overrides
+     * are allowed and a non-blank override is set for this project, the override wins; otherwise the
+     * global severity is used. When overrides are disallowed, the global severity is enforced
+     * regardless of any project override.
+     */
+    private static Severity resolveSeverity(SensorContext context, String globalKey, String overrideKey,
+                                            boolean allowProjectOverrides, Severity defaultSeverity) {
+        Severity global = parseSeverity(context, globalKey, defaultSeverity);
+        if (!allowProjectOverrides) {
+            return global;
+        }
+        return context.config().get(overrideKey)
                 .map(String::trim)
-                .map(String::toUpperCase)
-                .map(s -> {
-                    try {
-                        return Severity.valueOf(s);
-                    } catch (IllegalArgumentException e) {
-                        LOG.warn("ExpiredCertSensor: invalid severity '{}' for '{}' — using default '{}'",
-                                s, propertyKey, defaultSeverity);
-                        return defaultSeverity;
-                    }
-                })
+                .filter(s -> !s.isEmpty())
+                .map(s -> parseSeverityValue(s, overrideKey, global))
+                .orElse(global);
+    }
+
+    private static Severity parseSeverity(SensorContext context, String key, Severity defaultSeverity) {
+        return context.config().get(key)
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(s -> parseSeverityValue(s, key, defaultSeverity))
                 .orElse(defaultSeverity);
+    }
+
+    private static Severity parseSeverityValue(String raw, String key, Severity fallback) {
+        try {
+            return Severity.valueOf(raw.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            LOG.warn("ExpiredCertSensor: invalid severity '{}' for '{}' — using '{}'", raw, key, fallback);
+            return fallback;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -306,15 +339,19 @@ public class ExpiredCertSensor implements Sensor {
             String message;
 
             if (!expiry.isAfter(today)) {
+                long daysAgo = ChronoUnit.DAYS.between(expiry, today);
+                String ago = daysAgo == 0 ? "today" : daysAgo + (daysAgo == 1 ? " day ago" : " days ago");
                 ruleId   = ExpiredCertRulesDefinition.RULE_EXPIRED;
                 severity = severityExpired;
-                message  = buildMessage(cert, "expired on " + expiry + ". Replace it immediately.");
+                message  = buildMessage(cert, "expired " + ago + " (on " + expiry
+                        + "). Replace it immediately.");
             } else if (!expiry.isAfter(threshold)) {
                 long daysLeft = ChronoUnit.DAYS.between(today, expiry);
+                String left = daysLeft == 0 ? "today" : "in " + daysLeft + (daysLeft == 1 ? " day" : " days");
                 ruleId   = ExpiredCertRulesDefinition.RULE_EXPIRING_SOON;
                 severity = severityExpiringSoon;
-                message  = buildMessage(cert, "expires in " + daysLeft + " days on " + expiry
-                        + ". Renew before expiry.");
+                message  = buildMessage(cert, "expires " + left + " (on " + expiry
+                        + "). Renew before expiry.");
             } else {
                 continue; // Certificate is healthy — no issue
             }
@@ -415,6 +452,26 @@ public class ExpiredCertSensor implements Sensor {
         }
 
         return passwords;
+    }
+
+    /**
+     * Builds a per-keystore password list that also tries the keystore's own file name and the
+     * name without its extension (e.g. "server.jks" → "server.jks", "server"), a common convention,
+     * before falling back to the configured/global password list.
+     */
+    private static List<String> withFileNamePasswords(String fileName, List<String> base) {
+        List<String> list = new ArrayList<>();
+        list.add(fileName);
+        int dot = fileName.lastIndexOf('.');
+        if (dot > 0) {
+            list.add(fileName.substring(0, dot));
+        }
+        for (String p : base) {
+            if (!list.contains(p)) {
+                list.add(p);
+            }
+        }
+        return list;
     }
 
     // -------------------------------------------------------------------------

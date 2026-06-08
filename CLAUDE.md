@@ -7,7 +7,7 @@ Custom SonarQube plugin that scans project workspaces for SSL/TLS certificates a
 ## Build & Test
 
 ```bash
-mvn clean package          # build plugin JAR (target/customSQ-expiredCert-rule-1.0.0.jar)
+mvn clean package          # build plugin JAR (target/customSQ-expiredCert-rule-1.1.0.jar)
 mvn clean test             # run all 25 tests
 mvn test -Dtest=ClassName  # run a specific test class
 ```
@@ -17,7 +17,7 @@ mvn test -Dtest=ClassName  # run a specific test class
 ## Deploy to Local SonarQube
 
 ```bash
-cp target/customSQ-expiredCert-rule-1.0.0.jar /Users/cyberdevil/Tools/SonarQube/plugins/
+cp target/customSQ-expiredCert-rule-1.1.0.jar /Users/cyberdevil/Tools/SonarQube/plugins/
 cd /Users/cyberdevil/Tools/SonarQube && docker compose down && docker compose up -d
 ```
 
@@ -82,7 +82,12 @@ When adding new certificate formats or rules, always add corresponding test reso
 
 ## Configuration Properties
 
-All 5 properties are global admin UI only (no project-level). Defined in `ExpiredCertRulesDefinition.propertyDefinitions()`. Defaults sourced from `plugin-config.properties`.
+Defined in `ExpiredCertRulesDefinition.propertyDefinitions()`. Defaults sourced from `plugin-config.properties`.
+
+- **Global-only** (`enabled`, `severity.expired`, `severity.expiringSoon`, `severity.allowProjectOverrides`, `warningDays`, `keystorePasswords`) — global Administration UI.
+- **Project-only** (`severity.expired.override`, `severity.expiringSoon.override`, `onlyOnQualifiers(PROJECT)`) — appear solely on project settings pages.
+
+Severity resolution lives in `ExpiredCertSensor.resolveSeverity`: when `allowProjectOverrides` is true a project override wins over the global severity; when false the global severity is enforced for every project. The global severities are intentionally global-only so their value stays recoverable at scan time even when a project sets an override (the scanner only sees the effective merged value, so the global must live in a key projects cannot shadow).
 
 ## CI/CD
 
